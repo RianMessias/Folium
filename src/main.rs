@@ -515,7 +515,7 @@ impl App {
                 let cover_resp = if let Some(tex) = self.cover_texture(ctx, id) {
                     ui.add(egui::Image::new(&tex).max_height(cover_h).sense(egui::Sense::drag()))
                 } else {
-                    ui.add(egui::Label::new("📕").sense(egui::Sense::drag()))
+                    ui.add(egui::Label::new("[sem capa]").sense(egui::Sense::drag()))
                 };
                 self.handle_drag(ctx, &cover_resp, id);
                 ui.vertical(|ui| {
@@ -531,27 +531,26 @@ impl App {
                             .weak(),
                     );
                     ui.horizontal(|ui| {
-                        if ui.small_button("▶ Continuar").clicked() {
+                        if icon_button(ui, Icon::Play, "Continuar lendo", true).clicked() {
                             self.resume_book(id);
                         }
+                        ui.label(egui::RichText::new("Continuar").small());
                         if let Some((cidx, pos, len)) = reorder {
-                            if ui.add_enabled(pos > 0, egui::Button::new("▲").small())
-                                .on_hover_text("Subir na pasta").clicked()
-                            {
+                            let up = icon_button(ui, Icon::Up, "Subir na pasta", pos > 0);
+                            if up.clicked() && pos > 0 {
                                 self.move_in_collection(cidx, pos, -1);
                             }
-                            if ui.add_enabled(pos + 1 < len, egui::Button::new("▼").small())
-                                .on_hover_text("Descer na pasta").clicked()
-                            {
+                            let down = icon_button(ui, Icon::Down, "Descer na pasta", pos + 1 < len);
+                            if down.clicked() && pos + 1 < len {
                                 self.move_in_collection(cidx, pos, 1);
                             }
                         }
-                        if in_collection && ui.small_button("⏏").on_hover_text("Tirar da pasta").clicked() {
+                        if in_collection && icon_button(ui, Icon::Eject, "Tirar da pasta", true).clicked() {
                             remove_from_all(&mut self.collections, id);
                             self.save_history();
                             self.status = "Livro fora da pasta.".to_string();
                         }
-                        if ui.small_button("✖").on_hover_text("Excluir da biblioteca").clicked() {
+                        if icon_button(ui, Icon::Close, "Excluir da biblioteca", true).clicked() {
                             self.delete_book(id);
                         }
                     });
@@ -786,6 +785,85 @@ fn dropdown_button(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
     resp.on_hover_text("Recolher/expandir")
 }
 
+/// Icones desenhados a mao: a fonte embutida nao tem os glifos de midia/navegacao
+/// (viram quadrados), entao todo icone de botao e pintado via painter.
+#[derive(Debug, Clone, Copy)]
+enum Icon {
+    Play,
+    Up,
+    Down,
+    Close,
+    Eject,
+}
+
+fn icon_button(ui: &mut egui::Ui, icon: Icon, tip: &str, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 20.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let v = ui.style().interact(&resp);
+        ui.painter().rect(rect, v.rounding, v.bg_fill, v.bg_stroke);
+        let c = rect.center();
+        let fg = if enabled { v.fg_stroke.color } else { ui.visuals().weak_text_color() };
+        let s = 4.5;
+        match icon {
+            Icon::Play => {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        c + egui::vec2(-s * 0.7, -s),
+                        c + egui::vec2(-s * 0.7, s),
+                        c + egui::vec2(s * 0.9, 0.0),
+                    ],
+                    fg,
+                    egui::Stroke::NONE,
+                ));
+            }
+            Icon::Up => {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        c + egui::vec2(-s, s * 0.7),
+                        c + egui::vec2(s, s * 0.7),
+                        c + egui::vec2(0.0, -s * 0.9),
+                    ],
+                    fg,
+                    egui::Stroke::NONE,
+                ));
+            }
+            Icon::Down => {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        c + egui::vec2(-s, -s * 0.7),
+                        c + egui::vec2(s, -s * 0.7),
+                        c + egui::vec2(0.0, s * 0.9),
+                    ],
+                    fg,
+                    egui::Stroke::NONE,
+                ));
+            }
+            Icon::Close => {
+                let st = egui::Stroke::new(1.6_f32, fg);
+                ui.painter().line_segment([c + egui::vec2(-s, -s), c + egui::vec2(s, s)], st);
+                ui.painter().line_segment([c + egui::vec2(-s, s), c + egui::vec2(s, -s)], st);
+            }
+            Icon::Eject => {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![
+                        c + egui::vec2(-s, s * 0.1),
+                        c + egui::vec2(s, s * 0.1),
+                        c + egui::vec2(0.0, -s * 0.9),
+                    ],
+                    fg,
+                    egui::Stroke::NONE,
+                ));
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(c + egui::vec2(-s, s * 0.5), c + egui::vec2(s, s * 0.9)),
+                    0.0,
+                    fg,
+                );
+            }
+        }
+    }
+    resp.on_hover_text(tip)
+}
+
 fn history_file() -> PathBuf {
     if let Some(proj) = directories::ProjectDirs::from("com", "rianmessias", "folium") {
         return proj.data_dir().join("history.json");
@@ -845,8 +923,8 @@ impl eframe::App for App {
         }
 
         egui::SidePanel::left("biblioteca").resizable(true).default_width(260.0).show(ctx, |ui| {
-            ui.heading("📚 Biblioteca");
-            if ui.button("📂 Abrir EPUB...").clicked() {
+            ui.heading("Biblioteca");
+            if ui.button("Abrir EPUB...").clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("EPUB", &["epub"]).pick_file() {
                     self.open_file(path);
                 }
@@ -866,7 +944,7 @@ impl eframe::App for App {
                         }
                     }
                     let lbl = ui.add(
-                        egui::Label::new(egui::RichText::new(format!("📁 {} ({})", col.name, col.books.len())).strong())
+                        egui::Label::new(egui::RichText::new(format!("{} ({})", col.name, col.books.len())).strong())
                             .sense(egui::Sense::click()),
                     );
                     if lbl.clicked() {
@@ -924,7 +1002,7 @@ impl eframe::App for App {
                     .order(egui::Order::Tooltip)
                     .fixed_pos(pos + egui::vec2(14.0, 14.0))
                     .show(ctx, |ui| {
-                        ui.label(egui::RichText::new(format!("📕 {title}")).strong());
+                        ui.label(egui::RichText::new(format!("{title}")).strong());
                     });
             }
         }
@@ -932,7 +1010,7 @@ impl eframe::App for App {
         if self.naming.is_some() {
             let mut close = false;
             let mut create = false;
-            egui::Window::new("📁 Nova pasta")
+            egui::Window::new("Nova pasta")
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .collapsible(false)
                 .resizable(false)
@@ -976,7 +1054,7 @@ impl eframe::App for App {
 
         egui::TopBottomPanel::bottom("nav").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("⏮ Anterior").clicked() {
+                if ui.button("Anterior").clicked() {
                     self.goto(self.page_idx.saturating_sub(1));
                 }
                 let total = self.pages.len().max(1);
@@ -985,7 +1063,7 @@ impl eframe::App for App {
                 if resp.changed() {
                     self.goto(p);
                 }
-                if ui.button("Proxima ⏭").clicked() {
+                if ui.button("Proxima").clicked() {
                     self.goto(self.page_idx + 1);
                 }
                 let pct = if self.pages.is_empty() { 0 } else { (self.page_idx + 1) * 100 / total };
@@ -1030,7 +1108,7 @@ impl eframe::App for App {
                                     ui.add(egui::Image::new(&t).shrink_to_fit().max_height(ui.available_height()));
                                 }
                                 None => {
-                                    ui.label("⚠ nao foi possivel decodificar esta imagem.");
+                                    ui.label("Imagem indisponivel. Tente reabrir o livro.");
                                 }
                             }
                         });
