@@ -329,6 +329,7 @@ impl App {
 
     /// Importa todos os EPUBs de uma pasta (recursivo). Mantem o progresso
     /// de quem ja esta na biblioteca; abre o primeiro importado no leitor.
+    /// Tudo entra numa pasta com o nome do diretorio importado.
     fn import_folder(&mut self, dir: &std::path::Path) {
         let mut files = Vec::new();
         collect_epubs(dir, &mut files, 0);
@@ -373,12 +374,39 @@ impl App {
                 break;
             }
         }
+        // agrupa tudo da pasta numa colecao com o nome do diretorio
+        let members = books_under_dir(&self.books, dir);
+        if !members.is_empty() {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Importados".to_string());
+            for id in &members {
+                remove_from_all(&mut self.collections, id);
+            }
+            match self.collections.iter_mut().find(|c| c.name == name) {
+                Some(c) => {
+                    for id in members {
+                        if !c.books.contains(&id) {
+                            c.books.push(id);
+                        }
+                    }
+                }
+                None => self.collections.push(Collection {
+                    name: name.clone(),
+                    books: members,
+                    collapsed: false,
+                }),
+            }
+            self.status = format!("Importados: {ok} novo(s), {skip} ja estavam. Pasta \"{name}\" pronta.");
+        } else {
+            self.status = format!("Importados: {ok} novo(s), {skip} ja estavam na biblioteca.");
+        }
         // mostra o primeiro importado no leitor
         if let Some(id) = first_new {
             self.resume_book(&id);
         }
         self.save_history();
-        self.status = format!("Importados: {ok} novo(s), {skip} ja estavam na biblioteca.");
     }
 
     fn goto(&mut self, idx: usize) {
@@ -941,6 +969,17 @@ fn load_library(path: &std::path::Path) -> LibraryFile {
     LibraryFile::default()
 }
 
+/// Ids dos livros cujo arquivo esta sob `dir`, ordenados pelo caminho
+/// (ordem previsivel de capitulos na pasta criada).
+fn books_under_dir(books: &HashMap<String, SavedBook>, dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<(&String, &SavedBook)> = books
+        .iter()
+        .filter(|(_, b)| std::path::Path::new(&b.path).starts_with(dir))
+        .collect();
+    v.sort_by(|a, b| a.1.path.cmp(&b.1.path));
+    v.into_iter().map(|(id, _)| id.clone()).collect()
+}
+
 /// Capa do EPUB (bytes da imagem), se houver.
 fn cover_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
     let mut doc = epub::doc::EpubDoc::new(path).ok()?;
@@ -1267,6 +1306,25 @@ mod tests {
         assert!(names.contains(&"c.epub".to_string()));
         assert!(!names.iter().any(|n| n == "b.txt"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn importar_agrupa_por_pasta() {
+        let dir = std::path::Path::new(r"E:\Mangas\Dororo");
+        let mut books = HashMap::new();
+        for (id, name) in [("b2", "Dororo - 02.epub"), ("b1", "Dororo - 01.epub"), ("x", "outro.epub")] {
+            books.insert(id.to_string(), SavedBook {
+                title: name.to_string(), author: "A".to_string(),
+                path: if id == "x" {
+                    r"E:\Outros\outro.epub".to_string()
+                } else {
+                    format!(r"E:\Mangas\Dororo\{name}")
+                },
+                page: 0, total: 10, updated: "0".to_string(),
+            });
+        }
+        let members = books_under_dir(&books, dir);
+        assert_eq!(members, vec!["b1".to_string(), "b2".to_string()]);
     }
 
     #[test]
