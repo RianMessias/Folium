@@ -723,6 +723,37 @@ fn resolve_href(base: Option<&std::path::Path>, href: &str) -> String {
     parts.join("/")
 }
 
+/// Seta do dropdown desenhada à mão (os glifos ▸/▾ não existem na fonte padrão e viram quadrado).
+fn dropdown_button(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let c = rect.center();
+        let s = 5.0;
+        let pts = if collapsed {
+            // aponta p/ direita
+            vec![
+                c + egui::vec2(-s * 0.6, -s),
+                c + egui::vec2(-s * 0.6, s),
+                c + egui::vec2(s * 0.8, 0.0),
+            ]
+        } else {
+            // aponta p/ baixo
+            vec![
+                c + egui::vec2(-s, -s * 0.6),
+                c + egui::vec2(s, -s * 0.6),
+                c + egui::vec2(0.0, s * 0.8),
+            ]
+        };
+        let color = if resp.hovered() {
+            ui.visuals().widgets.hovered.fg_stroke.color
+        } else {
+            ui.visuals().text_color()
+        };
+        ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+    }
+    resp.on_hover_text("Recolher/expandir")
+}
+
 fn history_file() -> PathBuf {
     if let Some(proj) = directories::ProjectDirs::from("com", "rianmessias", "folium") {
         return proj.data_dir().join("history.json");
@@ -796,8 +827,7 @@ impl eframe::App for App {
             let cols = self.collections.clone();
             for (idx, col) in cols.iter().enumerate() {
                 let header = ui.horizontal(|ui| {
-                    let arrow = if col.collapsed { "▸" } else { "▾" };
-                    if ui.small_button(arrow).on_hover_text("Recolher/expandir").clicked() {
+                    if dropdown_button(ui, col.collapsed).clicked() {
                         if let Some(c) = self.collections.get_mut(idx) {
                             c.collapsed = !c.collapsed;
                             self.save_history();
