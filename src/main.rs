@@ -126,6 +126,7 @@ fn save_config(cfg: &Config) {
 
 struct App {
     books: HashMap<String, SavedBook>,
+    collections: Vec<Collection>,
     current_id: Option<String>,
     pages: Vec<Page>,
     page_idx: usize,
@@ -136,6 +137,14 @@ struct App {
     /// Texturas das paginas de imagem ja decodificadas (cache curto p/ nao estourar RAM).
     tex_cache: HashMap<usize, egui::TextureHandle>,
     tex_book: Option<String>,
+    /// Miniaturas das capas na biblioteca.
+    covers: HashMap<String, egui::TextureHandle>,
+    covers_missing: std::collections::HashSet<String>,
+    /// Livro sendo arrastado (id) + retangulos de drop registrados neste frame.
+    dragging: Option<String>,
+    drop_rects: HashMap<String, egui::Rect>,
+    /// Modal de nome obrigatorio ao criar pasta.
+    naming: Option<NamingState>,
 }
 
 /// Uma pagina do livro: texto paginado ou imagem (mangas/scans de pagina inteira).
@@ -149,7 +158,14 @@ enum Page {
 impl App {
     fn new(_cc: &eframe::CreationContext) -> Self {
         let history_path = history_file();
-        let books = load_history(&history_path);
+        let lib = load_library(&history_path);
+        let books = lib.books;
+        let mut collections = lib.collections;
+        // limpa referencias a livros que nao existem mais
+        for c in &mut collections {
+            c.books.retain(|id| books.contains_key(id));
+        }
+        collections.retain(|c| c.books.len() >= 2);
         // reabre o ultimo lido, se ainda existir
         let mut current_id = None;
         let mut pages = Vec::new();
@@ -169,6 +185,7 @@ impl App {
         }
         Self {
             books,
+            collections,
             current_id,
             pages,
             page_idx,
@@ -178,6 +195,11 @@ impl App {
             history_path,
             tex_cache: HashMap::new(),
             tex_book: None,
+            covers: HashMap::new(),
+            covers_missing: std::collections::HashSet::new(),
+            dragging: None,
+            drop_rects: HashMap::new(),
+            naming: None,
         }
     }
 
@@ -322,8 +344,202 @@ impl App {
         if let Some(dir) = self.history_path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(json) = serde_json::to_string_pretty(&self.books) {
+        let lib = LibraryFile {
+            books: self.books.clone(),
+            collections: self.collections.clone(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&lib) {
             let _ = std::fs::write(&self.history_path, json);
+        }
+    }
+
+    /// Miniatura da capa p/ a biblioteca (cache; None = sem capa ou falhou).
+    fn cover_texture(&mut self, ctx: &egui::Context, id: &str) -> Option<egui::TextureHandle> {
+        if let Some(t) = self.covers.get(id) {
+            return Some(t.clone());
+        }
+        if self.covers_missing.contains(id) {
+            return None;
+        }
+        let tex = (|| {
+            let path = self.books.get(id).map(|b| b.path.clone())?;
+            let bytes = cover_bytes(std::path::Path::new(&path))?;
+            let img = image::load_from_memory(&bytes).ok()?;
+            let thumb = img.thumbnail(96, 140);
+            let rgba = thumb.to_rgba8();
+            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+            let color = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_flat_samples().as_slice());
+            Some(ctx.load_texture(format!("folium-cover-{id}"), color, egui::TextureOptions::LINEAR))
+        })();
+        match tex {
+            Some(t) => {
+                self.covers.insert(id.to_string(), t.clone());
+                Some(t)
+            }
+            None => {
+                self.covers_missing.insert(id.to_string());
+                None
+            }
+        }
+    }
+
+    /// Em qual pasta (indice) o livro esta, se estiver.
+    fn collection_of(&self, book: &str) -> Option<usize> {
+        self.collections.iter().position(|c| c.books.iter().any(|b| b == book))
+    }
+
+    /// Aplica o drop de um livro sobre um alvo.
+    /// Retorna true se abriu o modal de nome (criacao de pasta pendente).
+    fn apply_drop(&mut self, dragged: &str, target: &DropTarget) -> bool {
+        match target {
+            DropTarget::Collection(idx) => {
+                if self.collection_of(dragged) == Some(*idx) {
+                    return false;
+                }
+                remove_from_all(&mut self.collections, dragged);
+                if let Some(c) = self.collections.get_mut(*idx) {
+                    c.books.push(dragged.to_string());
+                }
+                self.save_history();
+                false
+            }
+            DropTarget::Book(other) => {
+                if dragged == other {
+                    return false;
+                }
+                if let Some(idx) = self.collection_of(other) {
+                    if self.collection_of(dragged) == Some(idx) {
+                        return false;
+                    }
+                    remove_from_all(&mut self.collections, dragged);
+                    if let Some(c) = self.collections.get_mut(idx) {
+                        c.books.push(dragged.to_string());
+                    }
+                    self.save_history();
+                    false
+                } else {
+                    // nova pasta com os dois: abre modal de nome obrigatorio
+                    self.naming = Some(NamingState {
+                        target: other.clone(),
+                        dragged: dragged.to_string(),
+                        name: String::new(),
+                    });
+                    true
+                }
+            }
+        }
+    }
+
+    /// Abre o livro na pagina salva e mostra no leitor.
+    fn resume_book(&mut self, id: &str) {
+        let b = match self.books.get(id) {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let p = PathBuf::from(&b.path);
+        if !p.exists() {
+            self.status = format!("Arquivo nao encontrado: {}", b.path);
+            return;
+        }
+        match Self::extract_pages(&p) {
+            Ok(pg) => {
+                self.current_id = Some(id.to_string());
+                self.pages = pg;
+                self.page_idx = b.page.min(self.pages.len().saturating_sub(1));
+                self.status = format!("Retomado: {} (pag. {})", b.title, self.page_idx + 1);
+            }
+            Err(e) => self.status = format!("Erro: {e}"),
+        }
+    }
+
+    /// Remove o livro da biblioteca (e das pastas).
+    fn delete_book(&mut self, id: &str) {
+        self.books.remove(id);
+        self.covers.remove(id);
+        self.covers_missing.remove(id);
+        remove_from_all(&mut self.collections, id);
+        if self.current_id.as_deref() == Some(id) {
+            self.current_id = None;
+            self.pages.clear();
+            self.page_idx = 0;
+        }
+        self.save_history();
+    }
+
+    /// Acha alvo de drop na posicao (exclui o proprio livro arrastado).
+    fn drop_target_at(&self, pos: egui::Pos2, dragged: &str) -> Option<DropTarget> {
+        let self_key = format!("book:{dragged}");
+        for (key, rect) in &self.drop_rects {
+            if key == &self_key || !rect.contains(pos) {
+                continue;
+            }
+            if let Some(id) = key.strip_prefix("book:") {
+                return Some(DropTarget::Book(id.to_string()));
+            }
+            if let Some(idx) = key.strip_prefix("col:").and_then(|s| s.parse::<usize>().ok()) {
+                return Some(DropTarget::Collection(idx));
+            }
+        }
+        None
+    }
+
+    /// Linha de um livro na biblioteca: capa + infos + botoes. Arrasta pela capa/titulo.
+    fn book_row(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, id: &str, b: &SavedBook, in_collection: bool) {
+        let pct = if b.total > 0 { b.page * 100 / b.total } else { 0 };
+        let cover_h = 110.0;
+        let group = ui.group(|ui| {
+            ui.horizontal(|ui| {
+                // capa (arrastavel)
+                let cover_resp = if let Some(tex) = self.cover_texture(ctx, id) {
+                    ui.add(egui::Image::new(&tex).max_height(cover_h).sense(egui::Sense::drag()))
+                } else {
+                    ui.add(egui::Label::new("📕").sense(egui::Sense::drag()))
+                };
+                self.handle_drag(ctx, &cover_resp, id);
+                ui.vertical(|ui| {
+                    ui.set_min_size(egui::vec2(120.0, cover_h));
+                    let title_resp = ui.add(
+                        egui::Label::new(egui::RichText::new(&b.title).strong()).sense(egui::Sense::drag()),
+                    );
+                    self.handle_drag(ctx, &title_resp, id);
+                    ui.label(egui::RichText::new(&b.author).small().weak());
+                    ui.label(
+                        egui::RichText::new(format!("pag. {} de {} ({}%)", b.page + 1, b.total.max(1), pct))
+                            .small()
+                            .weak(),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.small_button("▶ Continuar").clicked() {
+                            self.resume_book(id);
+                        }
+                        if in_collection && ui.small_button("⏏").on_hover_text("Tirar da pasta").clicked() {
+                            remove_from_all(&mut self.collections, id);
+                            self.save_history();
+                            self.status = "Livro fora da pasta.".to_string();
+                        }
+                        if ui.small_button("✖").on_hover_text("Excluir da biblioteca").clicked() {
+                            self.delete_book(id);
+                        }
+                    });
+                });
+            });
+        });
+        // registra area de drop
+        self.drop_rects.insert(format!("book:{id}"), group.response.rect);
+    }
+
+    fn handle_drag(&mut self, ctx: &egui::Context, resp: &egui::Response, id: &str) {
+        if resp.drag_started() {
+            self.dragging = Some(id.to_string());
+        }
+        if resp.drag_stopped() {
+            self.dragging = None;
+            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                if let Some(target) = self.drop_target_at(pos, id) {
+                    let dragged = id.to_string();
+                    self.apply_drop(&dragged, &target);
+                }
+            }
         }
     }
 
@@ -512,11 +728,34 @@ fn history_file() -> PathBuf {
     PathBuf::from("history.json")
 }
 
-fn load_history(path: &std::path::Path) -> HashMap<String, SavedBook> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn load_library(path: &std::path::Path) -> LibraryFile {
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    if raw.trim().is_empty() {
+        return LibraryFile::default();
+    }
+    // formato novo
+    if let Ok(lib) = serde_json::from_str::<LibraryFile>(&raw) {
+        return lib;
+    }
+    // migracao do formato antigo (so livros)
+    if let Ok(books) = serde_json::from_str::<HashMap<String, SavedBook>>(&raw) {
+        return LibraryFile { books, collections: Vec::new() };
+    }
+    LibraryFile::default()
+}
+
+/// Capa do EPUB (bytes da imagem), se houver.
+fn cover_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
+    let mut doc = epub::doc::EpubDoc::new(path).ok()?;
+    doc.get_cover().map(|(bytes, _mime)| bytes)
+}
+
+/// Tira o livro de todas as pastas. Dissolve pastas que ficarem com < 2 livros.
+fn remove_from_all(collections: &mut Vec<Collection>, book: &str) {
+    for c in collections.iter_mut() {
+        c.books.retain(|b| b != book);
+    }
+    collections.retain(|c| c.books.len() >= 2);
 }
 
 fn now_iso() -> String {
@@ -540,57 +779,116 @@ impl eframe::App for App {
             self.goto(self.page_idx.saturating_sub(1));
         }
 
-        egui::SidePanel::left("biblioteca").resizable(true).default_width(250.0).show(ctx, |ui| {
+        egui::SidePanel::left("biblioteca").resizable(true).default_width(260.0).show(ctx, |ui| {
             ui.heading("📚 Biblioteca");
             if ui.button("📂 Abrir EPUB...").clicked() {
                 if let Some(path) = rfd::FileDialog::new().add_filter("EPUB", &["epub"]).pick_file() {
                     self.open_file(path);
                 }
             }
+            ui.small("Arraste um livro pela capa/titulo sobre outro para criar pasta.");
             ui.separator();
-            let mut order: Vec<(String, SavedBook)> =
-                self.books.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            order.sort_by(|a, b| b.1.updated.cmp(&a.1.updated));
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (id, b) in order {
-                    let pct = if b.total > 0 { b.page * 100 / b.total } else { 0 };
-                    let selected = Some(id.clone()) == self.current_id;
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new(&b.title).strong());
-                        ui.label(egui::RichText::new(&b.author).small().weak());
-                        ui.label(egui::RichText::new(format!("pag. {} de {} ({}%)", b.page + 1, b.total.max(1), pct)).small().weak());
-                        ui.horizontal(|ui| {
-                            if ui.small_button("▶ Continuar").clicked() {
-                                let p = PathBuf::from(&b.path);
-                                if p.exists() {
-                                    match Self::extract_pages(&p) {
-                                        Ok(pg) => {
-                                            self.current_id = Some(id.clone());
-                                            self.pages = pg;
-                                            self.page_idx = b.page.min(self.pages.len().saturating_sub(1));
-                                            self.status = format!("Retomado: {} (pag. {})", b.title, self.page_idx + 1);
-                                        }
-                                        Err(e) => self.status = format!("Erro: {e}"),
-                                    }
-                                } else {
-                                    self.status = format!("Arquivo nao encontrado: {}", b.path);
-                                }
-                            }
-                            if ui.small_button("✖").clicked() {
-                                self.books.remove(&id);
-                                if self.current_id == Some(id.clone()) {
-                                    self.current_id = None;
-                                    self.pages.clear();
-                                    self.page_idx = 0;
-                                }
-                                self.save_history();
-                            }
-                        });
+            self.drop_rects.clear();
+            // pastas
+            let mut desfazer: Option<usize> = None;
+            let cols = self.collections.clone();
+            for (idx, col) in cols.iter().enumerate() {
+                let header = ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("📁 {} ({})", col.name, col.books.len())).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Desfazer").on_hover_text("Desfazer pasta (mantem os livros)").clicked() {
+                            desfazer = Some(idx);
+                        }
                     });
-                    let _ = selected;
+                });
+                self.drop_rects.insert(format!("col:{idx}"), header.response.rect);
+                for bid in col.books.clone() {
+                    if let Some(b) = self.books.get(&bid).cloned() {
+                        self.book_row(ctx, ui, &bid, &b, true);
+                    }
+                }
+                ui.separator();
+            }
+            if let Some(idx) = desfazer {
+                if idx < self.collections.len() {
+                    let name = self.collections[idx].name.clone();
+                    self.collections.remove(idx);
+                    self.save_history();
+                    self.status = format!("Pasta \"{name}\" desfeita.");
+                }
+            }
+            // avulsos (fora de pastas), mais recentes primeiro
+            let in_any: std::collections::HashSet<&String> =
+                self.collections.iter().flat_map(|c| &c.books).collect();
+            let mut loose: Vec<(String, SavedBook)> = self
+                .books
+                .iter()
+                .filter(|(k, _)| !in_any.contains(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            loose.sort_by(|a, b| b.1.updated.cmp(&a.1.updated));
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (id, b) in loose {
+                    self.book_row(ctx, ui, &id, &b, false);
                 }
             });
         });
+        // preview flutuante durante o arrasto
+        if let Some(drag_id) = self.dragging.clone() {
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                let title = self.books.get(&drag_id).map(|b| b.title.clone()).unwrap_or_default();
+                egui::Area::new(egui::Id::new("dndpreview"))
+                    .order(egui::Order::Tooltip)
+                    .fixed_pos(pos + egui::vec2(14.0, 14.0))
+                    .show(ctx, |ui| {
+                        ui.label(egui::RichText::new(format!("📕 {title}")).strong());
+                    });
+            }
+        }
+        // modal de nome obrigatorio da nova pasta
+        if self.naming.is_some() {
+            let mut close = false;
+            let mut create = false;
+            egui::Window::new("📁 Nova pasta")
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Nome da pasta (obrigatorio):");
+                    let resp = ui.text_edit_singleline(&mut self.naming.as_mut().unwrap().name);
+                    resp.request_focus();
+                    let ok = !self.naming.as_ref().unwrap().name.trim().is_empty();
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(ok, egui::Button::new("Criar")).clicked() {
+                            create = true;
+                        }
+                        if ui.button("Cancelar").clicked() {
+                            close = true;
+                        }
+                    });
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && ok {
+                        create = true;
+                    }
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close = true;
+                    }
+                });
+            if create {
+                if let Some(n) = self.naming.take() {
+                    let name = n.name.trim().to_string();
+                    remove_from_all(&mut self.collections, &n.target);
+                    remove_from_all(&mut self.collections, &n.dragged);
+                    self.collections.push(Collection {
+                        name: name.clone(),
+                        books: vec![n.target, n.dragged],
+                    });
+                    self.save_history();
+                    self.status = format!("Pasta \"{name}\" criada.");
+                }
+            } else if close {
+                self.naming = None;
+            }
+        }
 
         egui::TopBottomPanel::bottom("nav").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -705,6 +1003,32 @@ mod tests {
         // config ausente/corrompida cai no padrao sem quebrar
         let bad: Config = serde_json::from_str("{invalido}").unwrap_or_default();
         assert_eq!(bad.theme, Theme::Sepia);
+    }
+    #[test]
+    fn pastas_drop_e_criacao() {
+        let mut cols: Vec<Collection> = Vec::new();
+        // drop de A sobre B (avulso) -> UI abriria modal; aqui simula criacao confirmada
+        remove_from_all(&mut cols, "A");
+        remove_from_all(&mut cols, "B");
+        cols.push(Collection { name: "Mangas".to_string(), books: vec!["B".to_string(), "A".to_string()] });
+        assert_eq!(cols.len(), 1);
+        // drop de C sobre A (que esta na pasta 0) -> entra na mesma pasta
+        let idx = cols.iter().position(|c| c.books.iter().any(|b| b == "A")).unwrap();
+        remove_from_all(&mut cols, "C");
+        cols[idx].books.push("C".to_string());
+        assert_eq!(cols[0].books.len(), 3);
+        // tirar B: pasta continua com 2
+        remove_from_all(&mut cols, "B");
+        assert_eq!(cols[0].books, vec!["A".to_string(), "C".to_string()]);
+        // tirar A: pasta dissolve (< 2)
+        remove_from_all(&mut cols, "A");
+        assert!(cols.is_empty());
+        // A e B na mesma pasta: drop entre eles nao muda nada (a UI nem abre modal)
+        cols.push(Collection { name: "Y".to_string(), books: vec!["A".to_string(), "B".to_string()] });
+        let ia = cols.iter().position(|c| c.books.iter().any(|b| b == "A"));
+        let ib = cols.iter().position(|c| c.books.iter().any(|b| b == "B"));
+        assert_eq!(ia, ib);
+        assert_eq!(cols[ia.unwrap()].books.len(), 2);
     }
     /// Teste de integracao local (pula se o arquivo nao existir): manga KCC deve
     /// gerar 1 pagina de imagem por figura, nao 1 pagina de ".".
