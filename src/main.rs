@@ -1135,6 +1135,7 @@ impl eframe::App for App {
             ui.small("Arraste um livro pela capa/titulo sobre outro para criar pasta.");
             ui.separator();
             self.drop_rects.clear();
+            egui::ScrollArea::vertical().show(ui, |ui| {
             // pastas
             let mut desfazer: Option<usize> = None;
             let cols = self.collections.clone();
@@ -1191,10 +1192,9 @@ impl eframe::App for App {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             loose.sort_by(|a, b| b.1.updated.cmp(&a.1.updated));
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (id, b) in loose {
-                    self.book_row(ctx, ui, &id, &b, false, None);
-                }
+            for (id, b) in loose {
+                self.book_row(ctx, ui, &id, &b, false, None);
+            }
             });
         });
         // preview flutuante durante o arrasto
@@ -1504,10 +1504,23 @@ mod tests {
     }
 }
 
+/// Icone da janela (mesmo desenho do .ico do exe).
+fn app_icon() -> Option<std::sync::Arc<egui::IconData>> {
+    let bytes = include_bytes!("../assets/icon.png");
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = img.to_rgba8();
+    Some(std::sync::Arc::new(egui::IconData {
+        rgba: rgba.as_flat_samples().as_slice().to_vec(),
+        width: rgba.width(),
+        height: rgba.height(),
+    }))
+}
+
 fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 750.0]),
-        ..Default::default()
-    };
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1100.0, 750.0]);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(APP_NAME, options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }

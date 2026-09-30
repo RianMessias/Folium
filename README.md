@@ -1,5 +1,7 @@
 # Folium
 
+![Folium](assets/icon.png)
+
 Leitor de EPUB estilo Kindle para PC, em Rust (rapido e liso).
 
 - Abre `.epub` com dialogo nativo (texto e **mangas de pagina inteira**)
