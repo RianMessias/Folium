@@ -327,6 +327,60 @@ impl App {
         }
     }
 
+    /// Importa todos os EPUBs de uma pasta (recursivo). Mantem o progresso
+    /// de quem ja esta na biblioteca; abre o primeiro importado no leitor.
+    fn import_folder(&mut self, dir: &std::path::Path) {
+        let mut files = Vec::new();
+        collect_epubs(dir, &mut files, 0);
+        if files.is_empty() {
+            self.status = format!("Nenhum EPUB em: {}", dir.display());
+            return;
+        }
+        let mut ok = 0;
+        let mut skip = 0;
+        let mut first_new: Option<String> = None;
+        for path in files {
+            let id = Self::book_id(&path);
+            if self.books.contains_key(&id) {
+                skip += 1;
+                continue;
+            }
+            match Self::extract_pages(&path) {
+                Ok(pages) => {
+                    let (title, author) = read_metadata(&path);
+                    let total = pages.len();
+                    self.books.insert(
+                        id.clone(),
+                        SavedBook {
+                            title: title.clone(),
+                            author: author.clone(),
+                            path: path.to_string_lossy().to_string(),
+                            page: 0,
+                            total,
+                            updated: now_iso(),
+                        },
+                    );
+                    ok += 1;
+                    if first_new.is_none() {
+                        first_new = Some(id);
+                    }
+                }
+                Err(e) => {
+                    self.status = format!("Falha em {}: {e}", path.display());
+                }
+            }
+            if ok + skip >= 500 {
+                break;
+            }
+        }
+        // mostra o primeiro importado no leitor
+        if let Some(id) = first_new {
+            self.resume_book(&id);
+        }
+        self.save_history();
+        self.status = format!("Importados: {ok} novo(s), {skip} ja estavam na biblioteca.");
+    }
+
     fn goto(&mut self, idx: usize) {
         if self.pages.is_empty() {
             return;
@@ -893,6 +947,30 @@ fn cover_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
     doc.get_cover().map(|(bytes, _mime)| bytes)
 }
 
+/// Coleta *.epub de um diretorio, recursivo (pula pastas ocultas; limite de profundidade 8).
+fn collect_epubs(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    // ordem estavel p/ importacao previsivel
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|x| x.path())).collect();
+    paths.sort();
+    for p in paths {
+        if p.is_dir() {
+            let hidden = p.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with('.')).unwrap_or(false);
+            if !hidden {
+                collect_epubs(&p, out, depth + 1);
+            }
+        } else if p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("epub")).unwrap_or(false) {
+            out.push(p);
+        }
+    }
+}
+
 /// Tira o livro de todas as pastas. Dissolve pastas que ficarem com < 2 livros.
 fn remove_from_all(collections: &mut Vec<Collection>, book: &str) {
     for c in collections.iter_mut() {
@@ -924,11 +1002,18 @@ impl eframe::App for App {
 
         egui::SidePanel::left("biblioteca").resizable(true).default_width(260.0).show(ctx, |ui| {
             ui.heading("Biblioteca");
-            if ui.button("Abrir EPUB...").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("EPUB", &["epub"]).pick_file() {
-                    self.open_file(path);
+            ui.horizontal(|ui| {
+                if ui.button("Abrir EPUB...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("EPUB", &["epub"]).pick_file() {
+                        self.open_file(path);
+                    }
                 }
-            }
+                if ui.button("Importar pasta...").on_hover_text("Adiciona todos os EPUBs da pasta (inclui subpastas)").clicked() {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        self.import_folder(&dir);
+                    }
+                }
+            });
             ui.small("Arraste um livro pela capa/titulo sobre outro para criar pasta.");
             ui.separator();
             self.drop_rects.clear();
@@ -1166,6 +1251,24 @@ mod tests {
         let bad: Config = serde_json::from_str("{invalido}").unwrap_or_default();
         assert_eq!(bad.theme, Theme::Sepia);
     }
+    #[test]
+    fn importar_pasta_coleta_recursiva() {
+        let base = std::env::temp_dir().join("folium-test-import");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        std::fs::write(base.join("a.epub"), b"fake").unwrap();
+        std::fs::write(base.join("b.txt"), b"fake").unwrap();
+        std::fs::write(base.join("sub").join("c.EPUB"), b"fake").unwrap();
+        std::fs::write(base.join(".oculta").join("d.epub"), b"fake").unwrap_or(());
+        let mut out = Vec::new();
+        collect_epubs(&base, &mut out, 0);
+        let names: Vec<String> = out.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase())).collect();
+        assert!(names.contains(&"a.epub".to_string()));
+        assert!(names.contains(&"c.epub".to_string()));
+        assert!(!names.iter().any(|n| n == "b.txt"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn pasta_ordem_manual() {
         let mut cols = vec![Collection {

@@ -3,6 +3,7 @@
 Leitor de EPUB estilo Kindle para PC, em Rust (rapido e liso).
 
 - Abre `.epub` com dialogo nativo (texto e **mangas de pagina inteira**)
+- Importa pasta completa com EPUBs (recursivo, pula duplicados)
 - Pagina o texto (coluna central, temas Claro/Sepia/Escuro, fonte A-/A+)
 - Mangas KCC/fixed-layout: cada imagem vira uma pagina, ajustada a tela
 - Biblioteca: capas, pastas/colecoes (arraste um livro sobre outro para criar,
