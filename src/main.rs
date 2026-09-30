@@ -47,6 +47,9 @@ struct App {
     theme: Theme,
     status: String,
     history_path: PathBuf,
+    /// Texturas das paginas de imagem ja decodificadas (cache curto p/ nao estourar RAM).
+    tex_cache: HashMap<usize, egui::TextureHandle>,
+    tex_book: Option<String>,
 }
 
 /// Uma pagina do livro: texto paginado ou imagem (mangas/scans de pagina inteira).
@@ -87,7 +90,36 @@ impl App {
             theme: Theme::Sepia,
             status: String::new(),
             history_path,
+            tex_cache: HashMap::new(),
+            tex_book: None,
         }
+    }
+
+    /// Retorna a textura da pagina de imagem atual, decodificando sob demanda.
+    /// Decodifica com a crate `image` (nao depende do loader interno do egui).
+    fn page_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let id = self.current_id.clone()?;
+        if self.tex_book.as_ref() != Some(&id) {
+            self.tex_cache.clear();
+            self.tex_book = Some(id.clone());
+        }
+        if let Some(tex) = self.tex_cache.get(&self.page_idx) {
+            return Some(tex.clone());
+        }
+        let (bytes, w, h) = match self.pages.get(self.page_idx) {
+            Some(Page::Image { bytes, w, h }) => (bytes.clone(), *w, *h),
+            _ => return None,
+        };
+        let img = image::load_from_memory(&bytes).ok()?;
+        let rgba = img.to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_flat_samples().as_slice());
+        // cache curto: so as ultimas paginas visitadas
+        if self.tex_cache.len() >= 6 {
+            self.tex_cache.clear();
+        }
+        let tex = ctx.load_texture(format!("folium-{id}-{}", self.page_idx), color, egui::TextureOptions::LINEAR);
+        self.tex_cache.insert(self.page_idx, tex.clone());
+        Some(tex)
     }
 
     fn book_id(path: &std::path::Path) -> String {
@@ -481,23 +513,21 @@ impl eframe::App for App {
                     ui.separator();
                 }
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                    match self.pages.get(self.page_idx).cloned() {
-                        Some(Page::Image { bytes, .. }) => {
-                            // pagina de manga: imagem centralizada, ajustada a altura
-                            ui.vertical_centered(|ui| {
-                                let uri = format!(
-                                    "bytes://{}-{}",
-                                    self.current_id.clone().unwrap_or_default(),
-                                    self.page_idx
-                                );
-                                ui.add(
-                                    egui::Image::from_bytes(uri, bytes)
-                                        .shrink_to_fit()
-                                        .max_height(ui.available_height()),
-                                );
-                            });
-                        }
-                        Some(Page::Text(texto)) => {
+                    let is_image = matches!(self.pages.get(self.page_idx), Some(Page::Image { .. }));
+                    if is_image {
+                        // pagina de manga: imagem centralizada, ajustada a altura
+                        let tex = self.page_texture(ctx);
+                        ui.vertical_centered(|ui| {
+                            match tex {
+                                Some(t) => {
+                                    ui.add(egui::Image::new(&t).shrink_to_fit().max_height(ui.available_height()));
+                                }
+                                None => {
+                                    ui.label("⚠ nao foi possivel decodificar esta imagem.");
+                                }
+                            }
+                        });
+                    } else if let Some(Page::Text(texto)) = self.pages.get(self.page_idx).cloned() {
                             // coluna central estilo Kindle
                             ui.horizontal(|ui| {
                                 let w = (ui.available_width() - 560.0).max(0.0) / 2.0;
@@ -507,11 +537,9 @@ impl eframe::App for App {
                                     ui.label(egui::RichText::new(texto).size(self.font_size).line_height(Some(self.font_size * 1.6)));
                                 });
                             });
-                        }
-                        None => {
+                        } else {
                             ui.label("Nenhuma pagina.");
                         }
-                    }
                 });
             } else {
                 ui.vertical_centered(|ui| {
@@ -551,8 +579,17 @@ mod tests {
             return;
         }
         let pages = App::extract_pages(p).expect("extracao falhou");
-        let imgs = pages.iter().filter(|p| matches!(p, Page::Image { .. })).count();
-        assert!(imgs >= 150, "esperava 150+ paginas de imagem, achou {imgs} em {} pags", pages.len());
+        let imgs: Vec<_> = pages.iter().filter_map(|p| match p {
+            Page::Image { bytes, w, h } => Some((bytes, w, h)),
+            _ => None,
+        }).collect();
+        assert!(imgs.len() >= 150, "esperava 150+ paginas de imagem, achou {} em {} pags", imgs.len(), pages.len());
+        // garante que a UI consegue decodificar (mesmo caminho do page_texture)
+        for (bytes, w, h) in imgs.iter().take(5) {
+            let img = image::load_from_memory(bytes).expect("jpeg deve decodificar");
+            let rgba = img.to_rgba8();
+            assert_eq!((rgba.width(), rgba.height()), (**w, **h));
+        }
     }
 }
 
