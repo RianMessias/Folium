@@ -41,12 +41,20 @@ impl Theme {
 struct App {
     books: HashMap<String, SavedBook>,
     current_id: Option<String>,
-    pages: Vec<String>,
+    pages: Vec<Page>,
     page_idx: usize,
     font_size: f32,
     theme: Theme,
     status: String,
     history_path: PathBuf,
+}
+
+/// Uma pagina do livro: texto paginado ou imagem (mangas/scans de pagina inteira).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum Page {
+    Text(String),
+    Image { bytes: Vec<u8>, w: u32, h: u32 },
 }
 
 impl App {
@@ -90,25 +98,60 @@ impl App {
         format!("{:x}", h.finalize())[..16].to_string()
     }
 
-    fn extract_pages(path: &std::path::Path) -> AnyhowText<Vec<String>> {
+    fn extract_pages(path: &std::path::Path) -> AnyhowText<Vec<Page>> {
         let mut doc = epub::doc::EpubDoc::new(path).map_err(|e| e.to_string())?;
         let n = doc.get_num_chapters();
+        let mut pages: Vec<Page> = Vec::new();
         let mut full = String::new();
         for i in 0..n {
             doc.set_current_chapter(i);
-            if let Some((content, _mime)) = doc.get_current_str() {
-                let text = html2text::from_read(content.as_bytes(), 100);
-                let t = text.trim();
-                if !t.is_empty() {
-                    full.push_str(t);
-                    full.push_str("\n\n");
+            let base = doc.get_current_path();
+            let Some((content, _mime)) = doc.get_current_str() else {
+                continue;
+            };
+            // Capas/paginas de manga (ex. KCC): o xhtml so tem <img> + "." escondido.
+            // Cada imagem vira uma pagina; o texto e ignorado nesses capitulos.
+            let mut found_img = false;
+            for src in extract_img_srcs(&content) {
+                let resolved = resolve_href(base.as_deref(), &src);
+                if let Some(bytes) = doc.get_resource_by_path(&resolved) {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    match imagesize::blob_size(&bytes) {
+                        Ok(sz) if sz.width > 0 && sz.height > 0 => {
+                            pages.push(Page::Image {
+                                bytes,
+                                w: sz.width as u32,
+                                h: sz.height as u32,
+                            });
+                            found_img = true;
+                        }
+                        _ => continue,
+                    }
                 }
             }
+            if found_img {
+                continue;
+            }
+            let text = html2text::from_read(content.as_bytes(), 100);
+            let t = text.trim();
+            // ignora placeholders de paginas fixas (ex. <div style="display:none;">.</div>)
+            if t.is_empty() || t == "." {
+                continue;
+            }
+            full.push_str(t);
+            full.push_str("\n\n");
         }
-        if full.trim().is_empty() {
-            return Err("EPUB sem texto extraivel (pode ser so imagens/scans)".to_string());
+        if !full.trim().is_empty() {
+            for t in paginate(&full, CHARS_PER_PAGE) {
+                pages.push(Page::Text(t));
+            }
         }
-        Ok(paginate(&full, CHARS_PER_PAGE))
+        if pages.is_empty() {
+            return Err("EPUB sem conteudo extraivel".to_string());
+        }
+        Ok(pages)
     }
 
     fn open_file(&mut self, path: PathBuf) {
@@ -246,6 +289,69 @@ fn paginate(text: &str, per: usize) -> Vec<String> {
     pages
 }
 
+/// Extrai valores de src="..." de tags <img> (sem regex, sem nova dependencia).
+fn extract_img_srcs(xhtml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = xhtml.as_bytes();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        let is_src = bytes[i] == b's' && bytes[i + 1] == b'r' && bytes[i + 2] == b'c' && bytes[i + 3] == b'=';
+        if is_src {
+            let mut j = i + 4;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+                let quote = bytes[j];
+                j += 1;
+                let start = j;
+                while j < bytes.len() && bytes[j] != quote {
+                    j += 1;
+                }
+                let src = &xhtml[start..j];
+                let low = src.to_ascii_lowercase();
+                if low.ends_with(".jpg") || low.ends_with(".jpeg") || low.ends_with(".png") || low.ends_with(".webp") {
+                    out.push(src.to_string());
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Resolve href relativo (ex. "../Images/p01.jpg") contra o path do capitulo
+/// (ex. "OEBPS/Text/p01.xhtml"). Retorna String com "/" (formato do ZIP,
+/// PathBuf usaria "\" no Windows e o lookup falharia).
+fn resolve_href(base: Option<&std::path::Path>, href: &str) -> String {
+    use std::path::Component;
+    let mut parts: Vec<String> = match base.and_then(|b| b.parent()) {
+        Some(d) => d
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    for comp in std::path::Path::new(href).components() {
+        match comp {
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::CurDir => {}
+            Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) => {
+                parts = vec![comp.as_os_str().to_string_lossy().into_owned()];
+            }
+        }
+    }
+    parts.join("/")
+}
+
 fn history_file() -> PathBuf {
     if let Some(proj) = directories::ProjectDirs::from("com", "rianmessias", "folium") {
         return proj.data_dir().join("history.json");
@@ -375,16 +481,37 @@ impl eframe::App for App {
                     ui.separator();
                 }
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                    // coluna central estilo Kindle
-                    ui.horizontal(|ui| {
-                        let w = (ui.available_width() - 560.0).max(0.0) / 2.0;
-                        ui.add_space(w);
-                        ui.vertical(|ui| {
-                            ui.set_width(560.0f32.min(ui.available_width()));
-                            let texto = self.pages.get(self.page_idx).cloned().unwrap_or_default();
-                            ui.label(egui::RichText::new(texto).size(self.font_size).line_height(Some(self.font_size * 1.6)));
-                        });
-                    });
+                    match self.pages.get(self.page_idx).cloned() {
+                        Some(Page::Image { bytes, .. }) => {
+                            // pagina de manga: imagem centralizada, ajustada a altura
+                            ui.vertical_centered(|ui| {
+                                let uri = format!(
+                                    "bytes://{}-{}",
+                                    self.current_id.clone().unwrap_or_default(),
+                                    self.page_idx
+                                );
+                                ui.add(
+                                    egui::Image::from_bytes(uri, bytes)
+                                        .shrink_to_fit()
+                                        .max_height(ui.available_height()),
+                                );
+                            });
+                        }
+                        Some(Page::Text(texto)) => {
+                            // coluna central estilo Kindle
+                            ui.horizontal(|ui| {
+                                let w = (ui.available_width() - 560.0).max(0.0) / 2.0;
+                                ui.add_space(w);
+                                ui.vertical(|ui| {
+                                    ui.set_width(560.0f32.min(ui.available_width()));
+                                    ui.label(egui::RichText::new(texto).size(self.font_size).line_height(Some(self.font_size * 1.6)));
+                                });
+                            });
+                        }
+                        None => {
+                            ui.label("Nenhuma pagina.");
+                        }
+                    }
                 });
             } else {
                 ui.vertical_centered(|ui| {
@@ -395,6 +522,37 @@ impl eframe::App for App {
                 });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn img_src_e_resolve() {
+        let x = r#"<html><body><img width="1" src="../Images/kcc-0001-kcc-x.jpg"/><img src='a.png'/></body></html>"#;
+        let srcs = extract_img_srcs(x);
+        assert_eq!(srcs, vec!["../Images/kcc-0001-kcc-x.jpg".to_string(), "a.png".to_string()]);
+        let base = Some(std::path::Path::new("OEBPS/Text/kcc-0001.xhtml"));
+        assert_eq!(
+            resolve_href(base, "../Images/kcc-0001-kcc-x.jpg"),
+            "OEBPS/Images/kcc-0001-kcc-x.jpg".to_string()
+        );
+    }
+
+    /// Teste de integracao local (pula se o arquivo nao existir): manga KCC deve
+    /// gerar 1 pagina de imagem por figura, nao 1 pagina de ".".
+    #[test]
+    fn manga_gera_paginas_de_imagem() {
+        let p = std::path::Path::new(r"E:\Mangas\Dororo\Kindle\Dororo Cap 01 - Osamu Tezuka.epub");
+        if !p.exists() {
+            eprintln!("pulando: epub de teste ausente");
+            return;
+        }
+        let pages = App::extract_pages(p).expect("extracao falhou");
+        let imgs = pages.iter().filter(|p| matches!(p, Page::Image { .. })).count();
+        assert!(imgs >= 150, "esperava 150+ paginas de imagem, achou {imgs} em {} pags", pages.len());
     }
 }
 
