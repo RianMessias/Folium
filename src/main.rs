@@ -28,6 +28,8 @@ struct SavedBook {
 struct Collection {
     name: String,
     books: Vec<String>, // ids
+    #[serde(default)]
+    collapsed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -794,7 +796,23 @@ impl eframe::App for App {
             let cols = self.collections.clone();
             for (idx, col) in cols.iter().enumerate() {
                 let header = ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("📁 {} ({})", col.name, col.books.len())).strong());
+                    let arrow = if col.collapsed { "▸" } else { "▾" };
+                    if ui.small_button(arrow).on_hover_text("Recolher/expandir").clicked() {
+                        if let Some(c) = self.collections.get_mut(idx) {
+                            c.collapsed = !c.collapsed;
+                            self.save_history();
+                        }
+                    }
+                    let lbl = ui.add(
+                        egui::Label::new(egui::RichText::new(format!("📁 {} ({})", col.name, col.books.len())).strong())
+                            .sense(egui::Sense::click()),
+                    );
+                    if lbl.clicked() {
+                        if let Some(c) = self.collections.get_mut(idx) {
+                            c.collapsed = !c.collapsed;
+                            self.save_history();
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Desfazer").on_hover_text("Desfazer pasta (mantem os livros)").clicked() {
                             desfazer = Some(idx);
@@ -802,9 +820,11 @@ impl eframe::App for App {
                     });
                 });
                 self.drop_rects.insert(format!("col:{idx}"), header.response.rect);
-                for bid in col.books.clone() {
-                    if let Some(b) = self.books.get(&bid).cloned() {
-                        self.book_row(ctx, ui, &bid, &b, true);
+                if !col.collapsed {
+                    for bid in col.books.clone() {
+                        if let Some(b) = self.books.get(&bid).cloned() {
+                            self.book_row(ctx, ui, &bid, &b, true);
+                        }
                     }
                 }
                 ui.separator();
@@ -881,6 +901,7 @@ impl eframe::App for App {
                     self.collections.push(Collection {
                         name: name.clone(),
                         books: vec![n.target, n.dragged],
+                        collapsed: false,
                     });
                     self.save_history();
                     self.status = format!("Pasta \"{name}\" criada.");
@@ -1010,7 +1031,7 @@ mod tests {
         // drop de A sobre B (avulso) -> UI abriria modal; aqui simula criacao confirmada
         remove_from_all(&mut cols, "A");
         remove_from_all(&mut cols, "B");
-        cols.push(Collection { name: "Mangas".to_string(), books: vec!["B".to_string(), "A".to_string()] });
+        cols.push(Collection { name: "Mangas".to_string(), books: vec!["B".to_string(), "A".to_string()], collapsed: false });
         assert_eq!(cols.len(), 1);
         // drop de C sobre A (que esta na pasta 0) -> entra na mesma pasta
         let idx = cols.iter().position(|c| c.books.iter().any(|b| b == "A")).unwrap();
@@ -1024,7 +1045,7 @@ mod tests {
         remove_from_all(&mut cols, "A");
         assert!(cols.is_empty());
         // A e B na mesma pasta: drop entre eles nao muda nada (a UI nem abre modal)
-        cols.push(Collection { name: "Y".to_string(), books: vec!["A".to_string(), "B".to_string()] });
+        cols.push(Collection { name: "Y".to_string(), books: vec!["A".to_string(), "B".to_string()], collapsed: false });
         let ia = cols.iter().position(|c| c.books.iter().any(|b| b == "A"));
         let ib = cols.iter().position(|c| c.books.iter().any(|b| b == "B"));
         assert_eq!(ia, ib);
