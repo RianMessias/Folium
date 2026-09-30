@@ -344,7 +344,7 @@ impl App {
                 v.panel_fill = egui::Color32::from_rgb(246, 248, 250);
                 v.window_fill = egui::Color32::WHITE;
                 v.extreme_bg_color = egui::Color32::from_rgb(234, 238, 242);
-                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(31, 35, 40));
+                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(31, 35, 40));
                 v.selection.bg_fill = egui::Color32::from_rgb(9, 105, 218);
                 v.hyperlink_color = egui::Color32::from_rgb(9, 105, 218);
                 v
@@ -355,7 +355,7 @@ impl App {
                 v.panel_fill = egui::Color32::from_rgb(39, 40, 34);
                 v.window_fill = egui::Color32::from_rgb(39, 40, 34);
                 v.extreme_bg_color = egui::Color32::from_rgb(30, 31, 28);
-                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(248, 248, 242));
+                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(248, 248, 242));
                 v.selection.bg_fill = egui::Color32::from_rgb(249, 38, 114);
                 v.hyperlink_color = egui::Color32::from_rgb(102, 217, 239);
                 v.warn_fg_color = egui::Color32::from_rgb(253, 151, 31);
@@ -367,7 +367,7 @@ impl App {
                 v.panel_fill = egui::Color32::from_rgb(26, 27, 38);
                 v.window_fill = egui::Color32::from_rgb(26, 27, 38);
                 v.extreme_bg_color = egui::Color32::from_rgb(22, 22, 30);
-                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(192, 202, 245));
+                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(192, 202, 245));
                 v.selection.bg_fill = egui::Color32::from_rgb(122, 162, 247);
                 v.hyperlink_color = egui::Color32::from_rgb(125, 207, 255);
                 v.warn_fg_color = egui::Color32::from_rgb(224, 175, 104);
