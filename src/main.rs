@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! Folium - leitor de EPUB em Rust, estilo Kindle.
 //! Abre EPUBs, pagina o texto e salva o historico (em qual pagina voce parou).
 
