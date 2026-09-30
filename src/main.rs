@@ -22,11 +22,48 @@ struct SavedBook {
     updated: String,
 }
 
+/// Pasta/colecao da biblioteca (estilo Kindle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+struct Collection {
+    name: String,
+    books: Vec<String>, // ids
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(dead_code)]
+struct LibraryFile {
+    #[serde(default)]
+    books: HashMap<String, SavedBook>,
+    #[serde(default)]
+    collections: Vec<Collection>,
+}
+
+/// Alvo de um drop na biblioteca.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum DropTarget {
+    Book(String),
+    Collection(usize),
+}
+
+/// Estado do modal de nome obrigatorio da nova pasta.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+struct NamingState {
+    target: String,  // livro que recebeu o drop
+    dragged: String, // livro arrastado
+    name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Theme {
     Claro,
     Sepia,
     Escuro,
+    Github,
+    Monokai,
+    TokyoNight,
 }
 
 impl Theme {
@@ -35,7 +72,55 @@ impl Theme {
             Theme::Claro => "Claro",
             Theme::Sepia => "Sepia",
             Theme::Escuro => "Escuro",
+            Theme::Github => "GitHub",
+            Theme::Monokai => "Monokai",
+            Theme::TokyoNight => "Tokyo Night",
         }
+    }
+
+    const ALL: [Theme; 6] = [
+        Theme::Claro,
+        Theme::Sepia,
+        Theme::Escuro,
+        Theme::Github,
+        Theme::Monokai,
+        Theme::TokyoNight,
+    ];
+}
+
+/// Config persistida (preset de cor etc.), em config.json ao lado do history.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Config {
+    theme: Theme,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { theme: Theme::Sepia }
+    }
+}
+
+fn config_path() -> PathBuf {
+    if let Some(proj) = directories::ProjectDirs::from("com", "rianmessias", "folium") {
+        return proj.data_dir().join("config.json");
+    }
+    PathBuf::from("config.json")
+}
+
+fn load_config() -> Config {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(cfg: &Config) {
+    let p = config_path();
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(cfg) {
+        let _ = std::fs::write(&p, json);
     }
 }
 
@@ -88,7 +173,7 @@ impl App {
             pages,
             page_idx,
             font_size: 17.0,
-            theme: Theme::Sepia,
+            theme: load_config().theme,
             status: String::new(),
             history_path,
             tex_cache: HashMap::new(),
@@ -253,6 +338,41 @@ impl App {
                 v
             }
             Theme::Escuro => egui::Visuals::dark(),
+            Theme::Github => {
+                // GitHub Primer light
+                let mut v = egui::Visuals::light();
+                v.panel_fill = egui::Color32::from_rgb(246, 248, 250);
+                v.window_fill = egui::Color32::WHITE;
+                v.extreme_bg_color = egui::Color32::from_rgb(234, 238, 242);
+                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(31, 35, 40));
+                v.selection.bg_fill = egui::Color32::from_rgb(9, 105, 218);
+                v.hyperlink_color = egui::Color32::from_rgb(9, 105, 218);
+                v
+            }
+            Theme::Monokai => {
+                // Monokai Pro-ish
+                let mut v = egui::Visuals::dark();
+                v.panel_fill = egui::Color32::from_rgb(39, 40, 34);
+                v.window_fill = egui::Color32::from_rgb(39, 40, 34);
+                v.extreme_bg_color = egui::Color32::from_rgb(30, 31, 28);
+                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(248, 248, 242));
+                v.selection.bg_fill = egui::Color32::from_rgb(249, 38, 114);
+                v.hyperlink_color = egui::Color32::from_rgb(102, 217, 239);
+                v.warn_fg_color = egui::Color32::from_rgb(253, 151, 31);
+                v
+            }
+            Theme::TokyoNight => {
+                // Tokyo Night
+                let mut v = egui::Visuals::dark();
+                v.panel_fill = egui::Color32::from_rgb(26, 27, 38);
+                v.window_fill = egui::Color32::from_rgb(26, 27, 38);
+                v.extreme_bg_color = egui::Color32::from_rgb(22, 22, 30);
+                v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(192, 202, 245));
+                v.selection.bg_fill = egui::Color32::from_rgb(122, 162, 247);
+                v.hyperlink_color = egui::Color32::from_rgb(125, 207, 255);
+                v.warn_fg_color = egui::Color32::from_rgb(224, 175, 104);
+                v
+            }
         };
         visuals.widgets.inactive.rounding = 6.0.into();
         ctx.set_visuals(visuals);
@@ -495,11 +615,15 @@ impl eframe::App for App {
                 if ui.small_button("A+").clicked() {
                     self.font_size = (self.font_size + 1.0).min(30.0);
                 }
+                let theme_before = self.theme;
                 egui::ComboBox::from_label("Tema").selected_text(self.theme.label()).show_ui(ui, |ui| {
-                    for t in [Theme::Claro, Theme::Sepia, Theme::Escuro] {
+                    for t in Theme::ALL {
                         ui.selectable_value(&mut self.theme, t, t.label());
                     }
                 });
+                if self.theme != theme_before {
+                    save_config(&Config { theme: self.theme });
+                }
             });
             if !self.status.is_empty() {
                 ui.label(egui::RichText::new(&self.status).small().weak());
@@ -570,6 +694,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tema_config_roundtrip() {
+        for t in Theme::ALL {
+            let cfg = Config { theme: t };
+            let json = serde_json::to_string(&cfg).expect("serializa");
+            let back: Config = serde_json::from_str(&json).expect("desserializa");
+            assert_eq!(back.theme, t);
+        }
+        // config ausente/corrompida cai no padrao sem quebrar
+        let bad: Config = serde_json::from_str("{invalido}").unwrap_or_default();
+        assert_eq!(bad.theme, Theme::Sepia);
+    }
     /// Teste de integracao local (pula se o arquivo nao existir): manga KCC deve
     /// gerar 1 pagina de imagem por figura, nao 1 pagina de ".".
     #[test]
