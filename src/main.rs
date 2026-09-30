@@ -339,6 +339,7 @@ impl App {
         }
         let mut ok = 0;
         let mut skip = 0;
+        let mut dup = 0;
         let mut first_new: Option<String> = None;
         for path in files {
             let id = Self::book_id(&path);
@@ -350,6 +351,11 @@ impl App {
                 Ok(pages) => {
                     let (title, author) = read_metadata(&path);
                     let total = pages.len();
+                    // mesmo conteudo ja importado de outro arquivo (ex. original + otimizado)?
+                    if self.books.values().any(|b| b.title == title && b.author == author && b.total == total) {
+                        dup += 1;
+                        continue;
+                    }
                     self.books.insert(
                         id.clone(),
                         SavedBook {
@@ -398,9 +404,9 @@ impl App {
                     collapsed: false,
                 }),
             }
-            self.status = format!("Importados: {ok} novo(s), {skip} ja estavam. Pasta \"{name}\" pronta.");
+            self.status = format!("Importados: {ok} novo(s), {skip} ja estavam, {dup} duplicados ignorados. Pasta \"{name}\" pronta.");
         } else {
-            self.status = format!("Importados: {ok} novo(s), {skip} ja estavam na biblioteca.");
+            self.status = format!("Importados: {ok} novo(s), {skip} ja estavam, {dup} duplicados ignorados.");
         }
         // mostra o primeiro importado no leitor
         if let Some(id) = first_new {
@@ -980,10 +986,44 @@ fn books_under_dir(books: &HashMap<String, SavedBook>, dir: &std::path::Path) ->
     v.into_iter().map(|(id, _)| id.clone()).collect()
 }
 
-/// Capa do EPUB (bytes da imagem), se houver.
+/// Capa do EPUB (bytes da imagem): metadado oficial ou, se ausente,
+/// a primeira imagem do arquivo (mangas KCC sem cover declarada).
 fn cover_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
-    let mut doc = epub::doc::EpubDoc::new(path).ok()?;
-    doc.get_cover().map(|(bytes, _mime)| bytes)
+    if let Ok(mut doc) = epub::doc::EpubDoc::new(path) {
+        if let Some((bytes, _mime)) = doc.get_cover() {
+            if !bytes.is_empty() {
+                return Some(bytes);
+            }
+        }
+    }
+    first_image_bytes(path)
+}
+
+/// Primeira imagem do ZIP (prefere nome com "cover"). So precisa de `deflate`.
+fn first_image_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).ok()?;
+    let mut z = zip::ZipArchive::new(f).ok()?;
+    let mut names: Vec<String> = Vec::new();
+    for i in 0..z.len() {
+        if let Ok(e) = z.by_index(i) {
+            names.push(e.name().to_string());
+        }
+    }
+    names.sort();
+    names.sort_by_key(|n| !n.to_lowercase().contains("cover"));
+    for n in names {
+        let low = n.to_lowercase();
+        if low.ends_with(".jpg") || low.ends_with(".jpeg") || low.ends_with(".png") || low.ends_with(".webp") {
+            if let Ok(mut e) = z.by_name(&n) {
+                let mut buf = Vec::new();
+                if e.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                    return Some(buf);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Coleta *.epub de um diretorio, recursivo (pula pastas ocultas; limite de profundidade 8).
@@ -1008,6 +1048,27 @@ fn collect_epubs(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {
             out.push(p);
         }
     }
+}
+
+/// Ids excedentes de livros duplicados (mesmo titulo+autor+total).
+/// Mantem o mais recentemente atualizado de cada grupo.
+fn duplicate_ids(books: &HashMap<String, SavedBook>) -> Vec<String> {
+    let mut groups: HashMap<(String, String, usize), Vec<String>> = HashMap::new();
+    for (id, b) in books {
+        groups
+            .entry((b.title.clone(), b.author.clone(), b.total))
+            .or_default()
+            .push(id.clone());
+    }
+    let mut out = Vec::new();
+    for (_, mut ids) in groups {
+        if ids.len() > 1 {
+            ids.sort_by(|a, b| books[a].updated.cmp(&books[b].updated));
+            ids.pop(); // mantem o mais recente
+            out.extend(ids);
+        }
+    }
+    out
 }
 
 /// Tira o livro de todas as pastas. Dissolve pastas que ficarem com < 2 livros.
@@ -1051,6 +1112,24 @@ impl eframe::App for App {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         self.import_folder(&dir);
                     }
+                }
+                if ui.button("Limpar duplicados").on_hover_text("Remove copias com mesmo titulo/autor/paginas (mantem a mais recente)").clicked() {
+                    let dups = duplicate_ids(&self.books);
+                    let n = dups.len();
+                    for id in dups {
+                        self.books.remove(&id);
+                        self.covers.remove(&id);
+                        self.covers_missing.remove(&id);
+                        remove_from_all(&mut self.collections, &id);
+                        if self.current_id.as_deref() == Some(&id) {
+                            self.current_id = None;
+                            self.pages.clear();
+                            self.page_idx = 0;
+                        }
+                    }
+                    self.save_history();
+                    // capas de quem ficou podem ter sumido do cache: invalida p/ recarregar
+                    self.status = format!("Removidos {n} duplicado(s).");
                 }
             });
             ui.small("Arraste um livro pela capa/titulo sobre outro para criar pasta.");
@@ -1306,6 +1385,37 @@ mod tests {
         assert!(names.contains(&"c.epub".to_string()));
         assert!(!names.iter().any(|n| n == "b.txt"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn duplicados_mantem_recente() {
+        let mut books = HashMap::new();
+        for (id, upd) in [("a", "10"), ("b", "30"), ("c", "20")] {
+            books.insert(id.to_string(), SavedBook {
+                title: "VOL.01".to_string(), author: "K".to_string(),
+                path: format!("{id}.epub"), page: 0, total: 100, updated: upd.to_string(),
+            });
+        }
+        books.insert("d".to_string(), SavedBook {
+            title: "VOL.02".to_string(), author: "K".to_string(),
+            path: "d.epub".to_string(), page: 0, total: 100, updated: "5".to_string(),
+        });
+        let mut dups = duplicate_ids(&books);
+        dups.sort();
+        assert_eq!(dups, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn capa_fallback_primeira_imagem() {
+        // Dororo KCC: mesmo sem metadado de capa, a 1a imagem serve
+        let p = std::path::Path::new(r"E:\Mangas\Dororo\Kindle\Dororo Cap 01 - Osamu Tezuka.epub");
+        if !p.exists() {
+            eprintln!("pulando: epub de teste ausente");
+            return;
+        }
+        let bytes = cover_bytes(p).expect("capa ou 1a imagem");
+        let img = image::load_from_memory(&bytes).expect("decodifica");
+        assert!(img.width() > 100 && img.height() > 100);
     }
 
     #[test]

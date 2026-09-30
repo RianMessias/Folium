@@ -17,3 +17,4 @@ directories = "5"
 sha2 = "0.10"
 imagesize = "0.13"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+zip = { version = "3", default-features = false, features = ["deflate"] }
