@@ -468,6 +468,17 @@ impl App {
         self.save_history();
     }
 
+    /// Move o livro dentro da pasta (delta -1 sobe, +1 desce).
+    fn move_in_collection(&mut self, col_idx: usize, pos: usize, delta: isize) {
+        if let Some(c) = self.collections.get_mut(col_idx) {
+            let n = c.books.len() as isize;
+            let to = pos as isize + delta;
+            if to >= 0 && to < n {
+                c.books.swap(pos, to as usize);
+                self.save_history();
+            }
+        }
+    }
     /// Acha alvo de drop na posicao (exclui o proprio livro arrastado).
     fn drop_target_at(&self, pos: egui::Pos2, dragged: &str) -> Option<DropTarget> {
         let self_key = format!("book:{dragged}");
@@ -486,7 +497,16 @@ impl App {
     }
 
     /// Linha de um livro na biblioteca: capa + infos + botoes. Arrasta pela capa/titulo.
-    fn book_row(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, id: &str, b: &SavedBook, in_collection: bool) {
+    /// `reorder` = (indice da pasta, posicao, total) p/ botoes de ordenacao manual.
+    fn book_row(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        id: &str,
+        b: &SavedBook,
+        in_collection: bool,
+        reorder: Option<(usize, usize, usize)>,
+    ) {
         let pct = if b.total > 0 { b.page * 100 / b.total } else { 0 };
         let cover_h = 110.0;
         let group = ui.group(|ui| {
@@ -513,6 +533,18 @@ impl App {
                     ui.horizontal(|ui| {
                         if ui.small_button("▶ Continuar").clicked() {
                             self.resume_book(id);
+                        }
+                        if let Some((cidx, pos, len)) = reorder {
+                            if ui.add_enabled(pos > 0, egui::Button::new("▲").small())
+                                .on_hover_text("Subir na pasta").clicked()
+                            {
+                                self.move_in_collection(cidx, pos, -1);
+                            }
+                            if ui.add_enabled(pos + 1 < len, egui::Button::new("▼").small())
+                                .on_hover_text("Descer na pasta").clicked()
+                            {
+                                self.move_in_collection(cidx, pos, 1);
+                            }
                         }
                         if in_collection && ui.small_button("⏏").on_hover_text("Tirar da pasta").clicked() {
                             remove_from_all(&mut self.collections, id);
@@ -851,9 +883,10 @@ impl eframe::App for App {
                 });
                 self.drop_rects.insert(format!("col:{idx}"), header.response.rect);
                 if !col.collapsed {
-                    for bid in col.books.clone() {
-                        if let Some(b) = self.books.get(&bid).cloned() {
-                            self.book_row(ctx, ui, &bid, &b, true);
+                    let n = col.books.len();
+                    for (pos, bid) in col.books.clone().iter().enumerate() {
+                        if let Some(b) = self.books.get(bid.as_str()).cloned() {
+                            self.book_row(ctx, ui, &bid, &b, true, Some((idx, pos, n)));
                         }
                     }
                 }
@@ -879,7 +912,7 @@ impl eframe::App for App {
             loose.sort_by(|a, b| b.1.updated.cmp(&a.1.updated));
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (id, b) in loose {
-                    self.book_row(ctx, ui, &id, &b, false);
+                    self.book_row(ctx, ui, &id, &b, false, None);
                 }
             });
         });
@@ -1055,6 +1088,23 @@ mod tests {
         let bad: Config = serde_json::from_str("{invalido}").unwrap_or_default();
         assert_eq!(bad.theme, Theme::Sepia);
     }
+    #[test]
+    fn pasta_ordem_manual() {
+        let mut cols = vec![Collection {
+            name: "D".to_string(),
+            books: vec!["cap02".to_string(), "cap01".to_string()],
+            collapsed: false,
+        }];
+        // sobe cap01 (pos 1 -> 0)
+        let (pos, len) = (1, cols[0].books.len());
+        assert!(pos > 0);
+        cols[0].books.swap(pos, pos - 1);
+        assert_eq!(cols[0].books, vec!["cap01".to_string(), "cap02".to_string()]);
+        // limites: nao sai do vetor
+        assert!(!(0usize.checked_sub(1).is_some_and(|to| to < len)));
+        assert!(!(len - 1 + 1 < len));
+    }
+
     #[test]
     fn pastas_drop_e_criacao() {
         let mut cols: Vec<Collection> = Vec::new();
